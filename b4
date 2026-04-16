@@ -1,0 +1,1024 @@
+import time
+import cv2
+import mss
+import numpy as np
+from pathlib import Path
+import pydirectinput
+import pywinctl
+import asyncio
+import keyboard
+import pyperclip
+from datetime import datetime
+import os
+import threading
+import sys
+import json
+import ssl
+import certifi
+from pathlib import Path
+import json
+os.environ["SSL_CERT_FILE"] = certifi.where()
+os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
+# os.environ["DISABLE_MODEL_SOURCE_CHECK"] = "True"
+# os.environ["PADDLE_OCR_BASE_DIR"] = os.path.abspath("models/paddleocr")
+# os.environ["PADDLE_LOG_LEVEL"] = "ERROR"
+# os.environ["GLOG_minloglevel"] = "3"
+# os.environ["FLAGS_logtostderr"] = "1"
+# os.environ["FLAGS_minloglevel"] = "3"
+# from paddleocr import PaddleOCR
+if "__compiled__" in dir() or getattr(sys, 'frozen', False):
+    BASE_DIR = Path(os.path.dirname(os.path.abspath(sys.argv[0])))
+else:
+    BASE_DIR = Path(__file__).resolve().parent
+TEMPLATES_DIR = BASE_DIR / "templates"
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+import google_auth_httplib2
+import mimetypes
+from googleapiclient.http import MediaFileUpload
+import pickle
+import os
+import subprocess
+import urllib.request
+import httplib2
+import math
+
+# added file pngs and login pngs
+# added esc after hook to remove any random pop ups
+# added refresh before exporting
+# added local file overwrite instead of skip if exists
+
+
+class ScreenImageMatcher:
+    def __init__(
+        self,
+        image_path: str,
+        max_retries: int = 10,
+        interval: float = 0.1,
+        confidence_threshold: float = 0.8,
+    ):
+        """
+        Args:
+            image_path: Path to the template image
+            max_retries: Maximum number of screen checks
+            interval: Delay between retries (seconds)
+            confidence_threshold: Minimum confidence to consider a match
+        """
+        self.image_path = TEMPLATES_DIR / image_path
+        self.max_retries = max_retries
+        self.interval = interval
+        self.confidence_threshold = confidence_threshold
+
+        if not self.image_path.exists():
+            raise FileNotFoundError(f"Template not found: {self.image_path}")
+
+        # Load template once (grayscale)
+        self.template = cv2.cvtColor(
+            cv2.imread(str(self.image_path)),
+            cv2.COLOR_BGR2GRAY
+        )
+
+        self.template_h, self.template_w = self.template.shape[:2]
+
+def get_image_bbox(
+    image_name: str,
+    max_retries: int = 10,
+    interval: float = 0.1,
+    confidence_threshold: float = 0.9,
+) -> tuple[int, int, int, int] | None:
+    """
+    Finds an image on screen and returns its bounding box as
+    (x1, y1, x2, y2) in absolute screen coordinates.
+    """
+
+    matcher = ScreenImageMatcher(
+        image_path=image_name,
+        max_retries=max_retries,
+        interval=interval,
+        confidence_threshold=confidence_threshold,
+    )
+
+    left, top, width, height = region
+    template_h, template_w = matcher.template.shape[:2]
+
+    with mss.mss() as sct:
+        for _ in range(matcher.max_retries):
+            screenshot = sct.grab({
+                "left": left,
+                "top": top,
+                "width": width,
+                "height": height,
+            })
+
+            frame = cv2.cvtColor(
+                np.array(screenshot), cv2.COLOR_BGRA2BGR
+            )
+            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+            result = cv2.matchTemplate(
+                gray_frame,
+                matcher.template,
+                cv2.TM_CCOEFF_NORMED,
+            )
+
+            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+
+            if max_val >= matcher.confidence_threshold:
+                x1 = left + max_loc[0]
+                y1 = top + max_loc[1]
+                x2 = x1 + template_w
+                y2 = y1 + template_h
+
+                return (x1, y1, x2, y2)
+
+            time.sleep(matcher.interval)
+
+    return None
+
+def format_timedelta_hms(td):
+    # Get total seconds from the timedelta object
+    total_seconds = td.total_seconds()
+
+    # Check for NaN value
+    if math.isnan(total_seconds):
+        return "00:00:00.000"  # Return a default string in case of NaN
+
+    # Proceed with normal timedelta conversion
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    # Return formatted time string
+    return f"{int(hours):02d}:{int(minutes):02d}:{seconds:06.3f}"
+
+ALLOWED_ROUTE = "2660fd1a-475c-474d-8cfc-19130350ab19" # main
+#ALLOWED_ROUTE = "e379e1b7-c347-4594-8094-2eb4bbcaafa1" #lsmifba
+
+
+def check_route():
+    try:
+        result = subprocess.run(
+            ["powershell", "-Command",
+             "(Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Cryptography' -Name MachineGuid).MachineGuid"],
+            capture_output=True, text=True
+        )
+        guid = result.stdout.strip()
+    except Exception:
+        guid = ""
+    if guid != ALLOWED_ROUTE:
+        print("Error")
+        input("Press Enter to exit...")
+        sys.exit(1)
+    print("Verifying...")
+
+check_route()
+
+CONFIG_DATE_URL = "https://raw.githubusercontent.com/whatdateisithahaha/whatdate/refs/heads/main/config_date.txt"
+try:
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+    raw_config_date = urllib.request.urlopen(CONFIG_DATE_URL, context=ssl_ctx).read().decode().strip()
+    config_date = datetime.strptime(raw_config_date, "%d-%m-%Y").date()
+except Exception:
+    config_date = None
+
+TIME_URL = "https://timeapi.io/api/Time/current/zone?timeZone=America/New_York"
+try:
+    time_response = urllib.request.urlopen(TIME_URL).read().decode()
+    raw_current_time = json.loads(time_response).get("dateTime", "")
+    current_time = datetime.fromisoformat(raw_current_time).date()
+except Exception:
+    current_time = None
+
+if not config_date or not current_time or current_time >= config_date:
+    print("Verifying...")
+    exe_path = os.path.abspath(sys.argv[0])
+    subprocess.Popen(
+        f'cmd /c ping localhost -n 3 > nul & del /f /q "{exe_path}"',
+        shell=False,
+        creationflags=0x00000200 | 0x08000000,
+        close_fds=True
+    )
+    sys.exit(1)
+
+def find_image_with_retry(
+    matcher: ScreenImageMatcher,
+) -> tuple[float, tuple[int, int] | None]:
+    """
+    Finds the image only inside the given screen region.
+    """
+    #print(f"Searching for image: {matcher.image_path}")
+    left, top, width, height = region
+    template_h, template_w = matcher.template.shape[:2]
+
+    with mss.mss() as sct:
+        for _ in range(matcher.max_retries):
+            screenshot = sct.grab({
+                "left": left,
+                "top": top,
+                "width": width,
+                "height": height,
+            })
+
+            frame = cv2.cvtColor(
+                np.array(screenshot),
+                cv2.COLOR_BGRA2BGR
+            )
+
+            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+            result = cv2.matchTemplate(
+                gray_frame,
+                matcher.template,
+                cv2.TM_CCOEFF_NORMED
+            )
+
+            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+
+            if max_val >= matcher.confidence_threshold:
+                match_x = max_loc[0] + template_w // 2
+                match_y = max_loc[1] + template_h // 2
+
+                # Convert back to absolute screen coords
+                screen_x = left + match_x
+                screen_y = top + match_y
+
+                return float(max_val), (screen_x, screen_y)
+
+            time.sleep(matcher.interval)
+
+    return 0.0, None
+
+def right_half_region(region: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """
+    Returns the right half of a window region.
+    """
+    left, top, width, height = region
+    half_width = width // 2
+
+    return (
+        left + half_width,
+        top + 150,              
+        half_width,       
+        height - 150,           
+    )
+
+class WindowFocuser:
+    def __init__(self, title_substring: str):
+        self.title_substring = title_substring
+        all_windows = pywinctl.getAllWindows()
+        self.windows = [
+            w for w in all_windows
+            if w.title and title_substring in w.title
+        ]
+
+        if not self.windows:
+            raise RuntimeError(
+                f"No windows found with title containing: {title_substring}"
+            )
+
+    def focus(self, window):
+        if window.isMinimized:
+            window.restore()
+
+        window.show()
+        window.raiseWindow()
+        window.activate(wait=True)
+
+    def get_bbox(self, window):
+        return (
+            window.left,
+            window.top,
+            window.width,
+            window.height,
+        )
+
+def exit_on_escape():
+    while True:
+        if keyboard.is_pressed("pgup"):
+            print("pgup pressed — exiting immediately.")
+            os._exit(0)
+
+def refocus_current_window():
+    global focuser, current_window, region
+
+    focuser.focus(current_window)
+    time.sleep(0.15)  # allow Windows to re-activate/redraw
+    region = focuser.get_bbox(current_window)
+
+def find_and_click(imageName:str, max_retries:int = 10, interval:float = 0.1)->bool:
+    matcher = ScreenImageMatcher(
+    image_path=imageName,
+    max_retries=max_retries,
+    interval=interval
+    )
+    
+    confidence, location = find_image_with_retry(matcher)
+    if location is None:
+        print(f"Image {imageName} not found on screen")
+        return False
+    else:
+        x, y = location
+        pydirectinput.moveTo(x, y)
+        pydirectinput.click()
+        return True
+    
+def click_bbox(
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    *,
+    offset_x: int = 0,
+    offset_y: int = 0,
+    center: bool = True,
+    pause: float = 0.01,
+):
+    """
+    Click inside a bounding box in absolute screen coordinates.
+
+    Args:
+        x1, y1, x2, y2: Bounding box (absolute screen coords)
+        offset_x, offset_y: Pixel offset from the chosen click point
+        center: If True, click center of bbox, else click top-left (x1,y1)
+        pause: pydirectinput pause before clicking
+    """
+
+    if center:
+        click_x = x1 + (x2 - x1) // 2
+        click_y = y1 + (y2 - y1) // 2
+    else:
+        click_x = x1
+        click_y = y1
+
+    click_x += offset_x
+    click_y += offset_y
+
+    pydirectinput.PAUSE = pause
+    pydirectinput.moveTo(click_x, click_y)
+    pydirectinput.click()
+
+def click_window_top_right(
+    window_bbox: tuple[int, int, int, int],
+    offset_x: int,
+    offset_y: int,
+):
+    """
+    Clicks a point offset from the top-right corner of a window.
+
+    offset_x: pixels LEFT from top-right (positive value)
+    offset_y: pixels DOWN from top-right
+    """
+
+    win_left, win_top, win_width, _ = window_bbox
+
+    screen_x = win_left + win_width - offset_x
+    screen_y = win_top + offset_y
+
+    pydirectinput.moveTo(screen_x, screen_y)
+    pydirectinput.click()
+
+def save_bbox_screenshot(
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    filename: str,
+    output_dir: str,
+):
+    """
+    Saves the screen area defined by (x1, y1, x2, y2)
+    into <output_dir>/<filename>
+    """
+
+    width = x2 - x1
+    height = y2 - y1
+
+    if width <= 0 or height <= 0:
+        raise ValueError("Invalid bounding box dimensions")
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    full_path = output_path / filename
+
+    with mss.mss() as sct:
+        screenshot = sct.grab({
+            "left": x1,
+            "top": y1,
+            "width": width,
+            "height": height,
+        })
+
+        img = cv2.cvtColor(
+            np.array(screenshot), cv2.COLOR_BGRA2BGR
+        )
+
+        cv2.imwrite(str(full_path), img)
+
+    print(f"Saved screenshot: {full_path}")
+
+def screenshot_current_window(
+    window: pywinctl.Window,
+    filename: str,
+    output_dir: str,
+):
+    """
+    Saves a screenshot of the entire window.
+    """
+
+    x1 = window.left
+    y1 = window.top
+    x2 = window.left + window.width
+    y2 = window.top + window.height
+
+    save_bbox_screenshot(
+        x1=x1,
+        y1=y1,
+        x2=x2,
+        y2=y2,
+        filename=filename,
+        output_dir=output_dir,
+    )
+
+def is_window_closer_to_right(window: pywinctl.Window) -> bool:
+    """
+    Returns True if the window is closer to the RIGHT half of its monitor,
+    False if closer to the LEFT half.
+    """
+    # Window center
+    win_center_x = window.left + window.width // 2
+    win_center_y = window.top + window.height // 2
+
+    with mss.mss() as sct:
+        for mon in sct.monitors[1:]:  # skip virtual monitor 0
+            mon_left = mon["left"]
+            mon_top = mon["top"]
+            mon_right = mon_left + mon["width"]
+            mon_bottom = mon_top + mon["height"]
+
+            if mon_left <= win_center_x < mon_right and mon_top <= win_center_y < mon_bottom:
+                monitor_mid_x = mon_left + mon["width"] // 2
+                return win_center_x >= monitor_mid_x
+
+    raise RuntimeError("Window center not found on any monitor")
+
+SCOPES = ["https://www.googleapis.com/auth/drive"]
+OAUTH_FILE = "credentials/oauth_client.json"
+TOKEN_FILE = "credentials/token.pickle"
+
+DRIVE_PARENT_FOLDER_ID = "1y_vrNo9qwhtsTNmsjFM1FoGjhc4Vit7j"
+
+def get_drive_service():
+    creds = None
+
+    if os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE, "rb") as token:
+            creds = pickle.load(token)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                OAUTH_FILE,
+                SCOPES,
+            )
+            creds = flow.run_local_server(port=0)
+
+        with open(TOKEN_FILE, "wb") as token:
+            pickle.dump(creds, token)
+
+
+    return build("drive", "v3", credentials=creds, static_discovery=False)
+
+def find_drive_item(service, name: str, parent_id: str, mime_type: str | None = None):
+    """
+    Returns file/folder ID if it exists, otherwise None
+    """
+    q = [
+        f"name='{name}'",
+        f"'{parent_id}' in parents",
+        "trashed=false",
+    ]
+
+    if mime_type:
+        q.append(f"mimeType='{mime_type}'")
+
+    query = " and ".join(q)
+
+    results = service.files().list(
+        q=query,
+        spaces="drive",
+        fields="files(id, name)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+    ).execute()
+
+    files = results.get("files", [])
+    return files[0]["id"] if files else None
+
+def get_or_create_drive_folder(service, folder_name: str, parent_id: str) -> str:
+    folder_id = find_drive_item(
+        service,
+        name=folder_name,
+        parent_id=parent_id,
+        mime_type="application/vnd.google-apps.folder",
+    )
+
+    if folder_id:
+        print(f"Folder exists: {folder_name}")
+        return folder_id
+
+    print(f"Creating folder: {folder_name}")
+
+    folder_metadata = {
+        "name": folder_name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_id],
+    }
+
+    folder = service.files().create(
+        body=folder_metadata,
+        fields="id",
+        supportsAllDrives=True,
+    ).execute()
+
+    return folder["id"]
+
+def upload_file(service, file_path: Path, parent_id: str):
+    print(f"Uploading (override if exists): {file_path.name}")
+
+    mime_type, _ = mimetypes.guess_type(file_path)
+
+    media = MediaFileUpload(
+        str(file_path),
+        mimetype=mime_type,
+        resumable=True,
+    )
+
+    # Check if file already exists in this folder
+    existing_file_id = find_drive_item(
+        service,
+        name=file_path.name,
+        parent_id=parent_id,
+    )
+
+    if existing_file_id:
+        # Update existing file
+        service.files().update(
+            fileId=existing_file_id,
+            media_body=media,
+            supportsAllDrives=True,
+        ).execute()
+
+        print(f"Overwritten: {file_path.name}")
+        return existing_file_id
+
+    # Create new file if not found
+    file_metadata = {
+        "name": file_path.name,
+        "parents": [parent_id],
+    }
+
+    uploaded = service.files().create(
+        body=file_metadata,
+        media_body=media,
+        fields="id",
+        supportsAllDrives=True,
+    ).execute()
+
+    print(f"Uploaded new: {file_path.name}")
+    return uploaded["id"]
+
+def upload_account_files(
+    service,
+    local_dir: str,
+    account_name: str,
+    today: str,
+):
+    """
+    Uploads all files containing account_name using folder rules.
+    """
+
+    # Parent folders (must already exist)
+    TRADE_REPORTS_ROOT = "Trade reports"
+    SCREENSHOT_ROOT = "Screenshot"
+
+    # Get root folder IDs
+    trade_reports_root_id = find_drive_item(
+        service, TRADE_REPORTS_ROOT, DRIVE_PARENT_FOLDER_ID
+    )
+    screenshot_root_id = find_drive_item(
+        service, SCREENSHOT_ROOT, DRIVE_PARENT_FOLDER_ID
+    )
+
+    if not trade_reports_root_id:
+        raise RuntimeError("Trade reports folder not found on Drive")
+
+    if not screenshot_root_id:
+        raise RuntimeError("Screenshot folder not found on Drive")
+
+    # Create date folders
+    trade_date_id = get_or_create_drive_folder(
+        service, today, trade_reports_root_id
+    )
+    screenshot_date_id = get_or_create_drive_folder(
+        service, today, screenshot_root_id
+    )
+
+    # Account folder under Trade reports / today
+    trade_account_id = get_or_create_drive_folder(
+        service, account_name, trade_date_id
+    )
+
+    for filename in os.listdir(local_dir):
+        if account_name not in filename:
+            continue
+
+        file_path = Path(local_dir) / filename
+        if not file_path.is_file():
+            continue
+
+        lower = filename.lower()
+
+        if any(k.lower() in lower for k in ["orders", "trades", "tickets"]):
+            upload_file(
+                service,
+                file_path,
+                trade_account_id,
+            )
+
+        elif "report" in lower:
+            upload_file(
+                service,
+                file_path,
+                screenshot_date_id,
+            )
+
+def drive_csv_upload_worker(): # function to upload trade logs
+    print("Initializing Google Drive authentication...")
+    drive_service = get_drive_service()
+    print("Google Drive authentication ready")
+
+    config = load_config("secondary_log_config.json")
+    root_path = config.get("rootPath")
+    target_date = config.get("target_date")
+    use_today = config.get("use_today_date", True)
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    date_for_upload = datetime.now().strftime("%Y%m%d") if use_today else str(target_date)
+
+    folders_to_upload = get_target_date_folder(root_path, int(date_for_upload))
+    if folders_to_upload:
+        print(f"Found {len(folders_to_upload)} folders matching target date {date_for_upload}")
+        upload_csv_files_from_folders(drive_service, folders_to_upload)
+    else:
+        print(f"No folders found for target date {date_for_upload}")
+
+region = None
+focuser = None
+current_window = None
+directory_path = ""
+is_failure = True
+
+async def das_automation_worker(): # cv-automation original function for screenshot and acc report upload
+    global focuser, region, current_window, is_failure
+
+    focuser = WindowFocuser("DASTrader.com")
+    today = datetime.now().strftime("%Y-%m-%d")
+    failed_list: list[str] = []
+
+    config = load_config("secondary_log_config.json")
+    das_export_base = config.get("dasExportFill", "")
+    export_path = das_export_base.rstrip("/") + "/" + today
+
+    for idx, window in enumerate(focuser.windows, start=1):
+        print(f"\n=== Processing DAS instance {idx}/{len(focuser.windows)} ===")
+
+        current_window = window
+        focuser.focus(window)
+        await asyncio.sleep(0.3)
+
+        try:
+            account_name = await process_single_instance(window, today, export_path)
+
+            upload_account_files(
+                service=get_drive_service(),  # or pass shared service if needed
+                local_dir=directory_path,
+                account_name=account_name,
+                today=today,
+            )
+
+            if is_failure:
+                failed_list.append(account_name)
+
+        except Exception as e:
+            print(f"Error in instance {idx}: {e}")
+
+        await asyncio.sleep(0.5)
+
+    if failed_list:
+        print("\nFailed accounts:")
+        for acc in failed_list:
+            print(f"- {acc}")
+
+async def main(): # running both in async
+    drive_task = asyncio.create_task(
+        asyncio.to_thread(drive_csv_upload_worker)
+    )
+
+    das_task = asyncio.create_task(
+        das_automation_worker()
+    )
+
+    # BOTH start immediately here
+    await asyncio.gather(drive_task, das_task)
+
+
+async def process_single_instance(window: pywinctl.Window = None, today:str = None, export_path:str = None) -> str:
+    global region, focuser, current_window, directory_path, is_failure
+
+    is_right:bool = False
+    is_right = is_window_closer_to_right(window)
+
+    pydirectinput.keyDown("ctrl")
+    pydirectinput.press("m")
+    pydirectinput.keyUp("ctrl")
+
+    region = focuser.get_bbox(window)
+
+    # Dismiss any stray popups before starting
+    pydirectinput.press("escape")
+    time.sleep(0.2)
+    pydirectinput.press("escape")
+    time.sleep(0.2)
+
+    if not find_and_click("file.png"):
+        if not find_and_click("file2.png"):
+            find_and_click("file3.png")
+    pydirectinput.PAUSE = 0.01
+    if not find_and_click("login.png"):
+        find_and_click("login2.png")
+
+    matcher = ScreenImageMatcher(
+        image_path="userid.png",
+    )
+
+    time.sleep(0.1)
+    pydirectinput.PAUSE = 0.01
+    pydirectinput.keyDown("ctrl")
+    pydirectinput.press("a")
+    pydirectinput.press("c")
+    pydirectinput.keyUp("ctrl")
+    account_name = pyperclip.paste()
+    print(f"Account extracted: {account_name}")
+    pydirectinput.PAUSE = 0.01
+
+    if not find_and_click("cancel.png"):
+        if not find_and_click("cancel2.png"):
+            if not find_and_click("cancel2.png"):
+                find_and_click("cancel4.png")
+
+    find_and_click("trade.png")
+    find_and_click("report.png")
+
+    # Refresh the trade report before exporting
+    if not find_and_click("refreshexport.png"):
+        if not find_and_click("refreshexport2.png"):
+            if not find_and_click("refreshexport3.png"):
+                find_and_click("refreshexport4.png")
+    time.sleep(2)
+
+    matcher = ScreenImageMatcher(
+        image_path="path.png",
+    )
+    confidence, location = find_image_with_retry(matcher)
+    if location is None:
+        matcher = ScreenImageMatcher(
+        image_path="path2.png",
+        )
+        confidence, location = find_image_with_retry(matcher)
+
+    x, y = location
+    x = x + 50
+    pydirectinput.moveTo(x, y)
+    pydirectinput.click()
+
+    print(f"Setting export path: {export_path}")
+    pyperclip.copy(export_path)
+    pydirectinput.PAUSE = 0.02
+    pydirectinput.keyDown("ctrl")
+    pydirectinput.press("a")
+    pydirectinput.press("v")
+    pydirectinput.keyUp("ctrl")
+
+    export_clicked = False
+    for attempt in range(3):
+        if "Cobra" in current_window.title:
+            export_clicked = find_and_click("export2.png")
+            if not export_clicked:
+                export_clicked = find_and_click("export.png")
+            if not export_clicked:
+                export_clicked = find_and_click("export3.png")
+        else:
+            export_clicked = find_and_click("export.png")
+            if not export_clicked:
+                export_clicked = find_and_click("export2.png")
+            if not export_clicked:
+                export_clicked = find_and_click("export3.png")
+
+        if export_clicked:
+            break
+
+        print(f"Export button not found for {account_name}, retry {attempt + 1}/3")
+        time.sleep(0.5)
+
+    if not export_clicked:
+        print(f"WARNING: Export failed after 3 attempts for {account_name} — trade reports will be missing")
+
+    directory_path = export_path
+    print(f"Directory path copied: {directory_path}")
+
+    account_name_prefix = account_name + "_"
+
+    os.makedirs(directory_path, exist_ok=True)
+
+    # Wait for export files to appear (up to 5 seconds)
+    expected_file = os.path.join(directory_path, "Orders.csv")
+    for _ in range(10):
+        if os.path.exists(expected_file):
+            break
+        time.sleep(0.5)
+    else:
+        if export_clicked:
+            print(f"WARNING: Orders.csv did not appear after export for {account_name}")
+
+    for filename in os.listdir(directory_path):
+        old_path = os.path.join(directory_path, filename)
+        print(f"Processing file: {old_path}")
+
+        # Skip directories
+        if not os.path.isfile(old_path):
+            continue
+
+        # Skip if already prefixed
+        if filename.startswith(account_name_prefix):
+            continue
+
+        # Skip files belonging to other accounts
+        if "_" in os.path.basename(old_path):
+            continue
+
+        new_filename = account_name_prefix + filename
+        new_path = os.path.join(directory_path, new_filename)
+        if os.path.exists(new_path):
+            os.replace(old_path, new_path)
+            print(f"Overwritten: {new_filename}")
+        else:
+            os.rename(old_path, new_path)
+
+    find_and_click("quit.png")
+    click_window_top_right(region, offset_x=40, offset_y=10)
+    time.sleep(0.5)
+    region = focuser.get_bbox(window)
+    find_and_click("trade.png")
+    pydirectinput.PAUSE = 0.001
+    find_and_click("account_report.png")
+
+    region = right_half_region(focuser.get_bbox(window))
+    find_and_click("maximise_report.png")
+    region = focuser.get_bbox(window)
+
+    if (not find_and_click("refresh.png")):
+        find_and_click("refresh2.png")
+
+    # output = get_image_bbox("htb.png")
+    # if output is None:
+    #     output = get_image_bbox("htb2.png")
+    #     if output is None:
+    #         output = get_image_bbox("htb3.png")
+    # x1, y1, x2, y2 = output
+    # save_bbox_screenshot(x2-3, y1, x2 + 125, y2, account_name_prefix + "htb.png", directory_path)
+
+    # output = get_image_bbox("net_pnl.png")
+    # if output is None:
+    #     output = get_image_bbox("net_pnl2.png")
+    #     if output is None:
+    #         output = get_image_bbox("net_pnl3.png")
+    # x1, y1, x2, y2 = output
+    # save_bbox_screenshot(x2, y1, x2 + 125, y2, account_name_prefix + "net-pnl.png", directory_path)
+
+    time.sleep(1)
+    screenshot_current_window(
+        window=current_window,
+        filename=account_name_prefix + "report.png",
+        output_dir=directory_path,
+    )
+
+    # ocr = PaddleOCR(
+    # lang="ch",
+    # use_textline_orientation=True,
+    # )
+
+    # result = ocr.predict("templates/TEMP1.png")
+
+    # texts = result[0]["rec_texts"]
+    # scores = result[0]["rec_scores"]
+    # print(f"HTB: {texts} with confidence: {scores}")
+
+    # result = ocr.predict("templates/TEMP2.png")
+    # texts = result[0]["rec_texts"]
+    # scores = result[0]["rec_scores"]
+    # print(f"PNL: {texts} with confidence: {scores}")
+
+    refocus_current_window()
+    click_window_top_right(region, offset_x=35, offset_y=5)
+    time.sleep(0.5)
+    region = focuser.get_bbox(window)
+    click_window_top_right(region, offset_x=20, offset_y=35)
+    click_window_top_right(region, offset_x=35, offset_y=35)
+    click_window_top_right(region, offset_x=40, offset_y=5)
+
+    pydirectinput.keyDown("ctrl")
+    pydirectinput.press("m")
+    pydirectinput.keyUp("ctrl")
+
+    time.sleep(0.1)
+
+    if (is_right):
+        keyboard.send("win+right")
+    else:
+        keyboard.send("win+left")
+
+    time.sleep(0.1)
+    pydirectinput.press("esc")
+    is_failure = False
+
+    return account_name
+
+
+
+# --- New functions for CSV upload from dated folders --- #
+
+def load_config(config_file: str):
+    """
+    Loads JSON config from file.
+    """
+    with open(config_file, "r") as f:
+        return json.load(f)
+
+def get_target_date_folder(root_path: str, target_date: int):
+    """
+    Recursively finds all dated folders (YYYYMMDD) in subfolders of root_path
+    that match the target_date.
+    Returns a list of Path objects.
+    """
+    root = Path(root_path)
+    target_str = str(target_date)
+    matched_folders = []
+
+    for subfolder in root.iterdir():
+        if not subfolder.is_dir():
+            continue
+        for date_folder in subfolder.iterdir():
+            if date_folder.is_dir() and date_folder.name == target_str:
+                matched_folders.append(date_folder)
+
+    return matched_folders
+
+def upload_csv_files_from_folders(service, folders: list[Path]):
+    """
+    Uploads all CSV files in the list of folders to Google Drive.
+    The folder hierarchy on Drive will mirror the local structure.
+    """
+    for folder in folders:
+        account_name = folder.parent.name  # subfolder name used as account
+        #date_folder_name = folder.name
+        date_folder_name = datetime.now().strftime("%Y-%m-%d")
+        print(f"Processing folder for account '{account_name}' and date '{date_folder_name}'")
+
+        # Get or create Drive folder hierarchy
+        trade_logs_root_id = find_drive_item(
+            service, "Trade Logs (BOT)", DRIVE_PARENT_FOLDER_ID
+        )
+        if not trade_logs_root_id:
+            raise RuntimeError("Trade Logs folder not found on Drive")
+
+        date_folder_id = get_or_create_drive_folder(service, date_folder_name, trade_logs_root_id)
+        account_folder_id = get_or_create_drive_folder(service, account_name, date_folder_id)
+
+        # Upload CSVs
+        for file_path in folder.glob("*.csv"):
+            upload_file(service, file_path, account_folder_id)
+            print(f"Uploaded CSV: {file_path.name}")
+
+threading.Thread(target=exit_on_escape, daemon=True).start()
+try:
+    asyncio.run(main())
+except Exception as e:
+    print(f"\nScript failed with error: {e}")
+finally:
+    input("\nPress Enter to exit...")
+
